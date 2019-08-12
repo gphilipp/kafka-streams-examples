@@ -1,0 +1,15 @@
+{
+  "namespace": "io.confluent.examples.streams.avro",
+  "type": "record",
+  "name": "Company",
+  "fields": [
+    {
+      "name": "external_id",
+      "type": "string"
+    },
+    {
+      "name": "internal_id",
+      "type": "string"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{"namespace": "io.confluent.examples.streams.avro",
+ "type": "record",
+ "name": "LoanApplication",
+ "fields": [
+     {"name": "amount", "type": "string"},
+     {"name": "company_id", "type": "string"}
+ ]
+}

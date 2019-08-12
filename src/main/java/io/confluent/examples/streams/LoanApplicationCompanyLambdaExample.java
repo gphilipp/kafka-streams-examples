@@ -63,6 +63,9 @@ import java.util.Properties;
  * docker-compose exec broker kafka-topics --create --topic LoanApplicationEnriched \
  *                  --zookeeper zookeeper:2181 --partitions 1 --replication-factor 1
  *
+ * docker-compose exec broker kafka-topics --zookeeper zookeeper:2181 --list
+ * docker-compose exec schema-registry kafka-avro-console-consumer --bootstrap-server broker:29092 --from-beginning --property print.key=true --key-deserializer=org.apache.kafka.common.serialization.StringDeserializer --property print.timestamp=true --property schema.registry.url=http://schema-registry:8081 --topic Company
+ *
  * }
  * </pre>
  * Note: The above commands are for the Confluent Platform. For Apache Kafka it should be {@code bin/kafka-topics.sh ...}.
@@ -134,6 +137,8 @@ public class LoanApplicationCompanyLambdaExample {
         final Serde<String> stringSerde = Serdes.String();
         final Serde<Long> longSerde = Serdes.Long();
 
+        final Serde<GenericRecord> valueGenericAvroSerde = new GenericAvroSerde();
+
         final StreamsBuilder builder = new StreamsBuilder();
 
         final KStream<String, GenericRecord> views = builder.stream("LoanApplication");
@@ -141,14 +146,14 @@ public class LoanApplicationCompanyLambdaExample {
         // Create a keyed stream of page view events from the PageViews stream,
         // by extracting the user id (String) from the Avro value
         final KStream<String, GenericRecord> loanAppByExternalCompanyId = views
-                .selectKey((k, v) -> v.get("company-id").toString());
+                .selectKey((k, v) -> v.get("company_id").toString());
 
         final KTable<String, GenericRecord> companies = builder.table("Company");
 
         // Create a changelog stream as a projection of the value to the region attribute only
-        final KTable companyExternalId =
+        final KTable<String, GenericRecord> companyByExternalId =
                 companies
-                        .groupBy((internalCompanyId, company) -> KeyValue.pair(company.get("external-id").toString(), company))
+                        .groupBy((internalCompanyId, company) -> KeyValue.pair(company.get("external_id").toString(), company))
                         .aggregate(
                                 // Initiate the aggregate value
                                 () -> null,
@@ -167,31 +172,17 @@ public class LoanApplicationCompanyLambdaExample {
                         .getResourceAsStream("avro/io/confluent/examples/streams/loan-application-enriched.avsc");
         final Schema schema = new Schema.Parser().parse(loanApplicationEnrichedSchema);
 
-        final KTable<Windowed<String>, Long> loanApplicationEnriched = loanAppByExternalCompanyId
-                .leftJoin(companyExternalId, (loanApp, Company) -> {
-                    final GenericRecord viewRegion = new GenericData.Record(schema);
-                    viewRegion.put("user", view.get("user"));
-                    viewRegion.put("page", view.get("page"));
-                    viewRegion.put("region", region);
-                    return viewRegion;
-                })
-                .map((user, viewRegion) -> new KeyValue<>(viewRegion.get("region").toString(), viewRegion))
-                // count views by region, using hopping windows of size 5 minutes that advance every 1 minute
-                .groupByKey() // no need to specify explicit serdes because the resulting key and value types match our default serde settings
-                .windowedBy(TimeWindows.of(Duration.ofMinutes(5)).advanceBy(Duration.ofMinutes(1)))
-                .count();
+        final KStream<String, GenericRecord> loanApplicationEnriched = loanAppByExternalCompanyId
+                .leftJoin(companyByExternalId, (loanApp, company) -> {
+                    final GenericRecord loanAppEnriched = new GenericData.Record(schema);
+                    loanAppEnriched.put("amount", loanApp.get("amount"));
+                    loanAppEnriched.put("company_id", loanApp.get("company_id"));
+                    loanAppEnriched.put("company_internal-id", company.get("internal_id"));
+                    return loanAppEnriched;
+                });
 
-        // Note: The following operations would NOT be needed for the actual pageview-by-region
-        // computation, which would normally stop at `count` above.  We use the operations
-        // below only to "massage" the output data so it is easier to inspect on the console via
-        // kafka-console-consumer.
-        final KStream<String, Long> viewsByRegionForConsole = loanApplicationEnriched
-                // get rid of windows (and the underlying KTable) by transforming the KTable to a KStream
-                // and by also converting the record key from type `Windowed<String>` (which
-                // kafka-console-consumer can't print to console out-of-the-box) to `String`
-                .toStream((windowedRegion, count) -> windowedRegion.toString());
 
-        viewsByRegionForConsole.to("PageViewsByRegion", Produced.with(stringSerde, longSerde));
+        loanApplicationEnriched.to("LoanApplicationEnriched", Produced.with(stringSerde, valueGenericAvroSerde));
 
         final KafkaStreams streams = new KafkaStreams(builder.build(), streamsConfiguration);
         // Always (and unconditionally) clean local state prior to starting the processing topology.
